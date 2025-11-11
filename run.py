@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher , F
 import asyncio
 
 from aiogram.filters import Command
-from handler import router
+from app.handlers import router
 
 from dotenv import load_dotenv
 from aiogram.filters import CommandStart
