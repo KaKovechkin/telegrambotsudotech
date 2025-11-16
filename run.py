@@ -1,34 +1,32 @@
-import os
-from aiogram.types import Message
-
-import aiogram
-from aiogram import Bot, Dispatcher , F
 import asyncio
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 
-from aiogram.filters import Command
-from app.handlers import router
-
-from dotenv import load_dotenv
-from aiogram.filters import CommandStart
-
-
-dp = Dispatcher()
-
-
-
+from app.handlers import router, reschedule_pending_reminders
+from app.db import init_db
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 async def main():
-    load_dotenv()
-    bot = Bot(os.getenv('TG_TOKEN'))
-    dp.include_router(router)
-    await dp.start_polling(bot)
-    
-    
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    from config import BOT_TOKEN as token
 
-    
-    
+    # ИНИЦИАЛИЗАЦИЯ БАЗЫ — ОБЯЗАТЕЛЬНО!
+    init_db()
+
+    bot = Bot(
+        token=token,
+        default=DefaultBotProperties(parse_mode="HTML")
+    )
+
+    dp = Dispatcher()
+
+    global scheduler
+    scheduler = AsyncIOScheduler()
+    scheduler.start()
+
+    await reschedule_pending_reminders(scheduler, bot)
+    dp.include_router(router)
+
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
