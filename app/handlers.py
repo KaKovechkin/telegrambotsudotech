@@ -1,366 +1,230 @@
-# app/handlers.py
-import asyncio
-from datetime import datetime
 from aiogram import Router, F
-from aiogram.types import Message, ReplyKeyboardRemove
-from aiogram.filters import Command, StateFilter
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.enums import ChatAction
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.date import DateTrigger
-
-import app.keyboards as kb
-from app.db import (
-    add_task, list_tasks, get_task, mark_completed, delete_task,
-    update_task_title, update_task_datetime, update_task_remind,
-    get_pending_reminders
-)
+from aiogram.types import Message, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from datetime import datetime
+from app.ai_agent import ai_answer
+from app.db import add_task, list_tasks, delete_task
+from app.keyboards import main_menu, ai_exit_kb
 
 router = Router()
 
-
-# ---------------------------------------------------------
-#  FSM: ДОБАВЛЕНИЕ ЗАДАЧИ
-# ---------------------------------------------------------
-class AddTaskStates(StatesGroup):
-    waiting_title = State()
-    waiting_date = State()
-    waiting_time = State()
-    waiting_remind = State()
+# Хранение состояния пользователя
+user_context = {}
 
 
-# ---------------------------------------------------------
-#  FSM: РЕДАКТИРОВАНИЕ ЗАДАЧИ
-# ---------------------------------------------------------
-class EditTaskStates(StatesGroup):
-    waiting_id = State()
-    choose_field = State()
-    edit_title = State()
-    edit_date = State()
-    edit_time = State()
-    edit_remind = State()
+# ------------------------------------------------------------
+# Главное меню
+# ------------------------------------------------------------
+@router.message(F.text == "/start")
+async def start(message: Message):
+    await message.answer("👋 Привет! Я — МойРитм, твой персональный планировщик.", reply_markup=main_menu())
 
 
-# ---------------------------------------------------------
-#  Чистая отправка сообщения
-# ---------------------------------------------------------
-async def send_clean(message: Message, text: str, keyboard=kb.main_menu):
-    try:
-        await message.delete()
-    except:
-        pass
-    await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-    await asyncio.sleep(0.4)
-    await message.answer(text, reply_markup=keyboard)
+@router.message(F.text == "/menu")
+async def menu(message: Message):
+    await message.answer("Главное меню:", reply_markup=main_menu())
 
 
-# ---------------------------------------------------------
-#  Планирование напоминания
-# ---------------------------------------------------------
-def schedule_reminder(scheduler: AsyncIOScheduler, bot, task_id: int, user_id: int, title: str, when_iso: str):
-    when = datetime.strptime(when_iso, "%Y-%m-%d %H:%M:%S")
-    if when <= datetime.utcnow():
-        return
-
-    job_id = f"reminder_{task_id}"
-    try:
-        scheduler.remove_job(job_id)
-    except:
-        pass
-
-    trigger = DateTrigger(run_date=when)
-
-    def job_send():
-        loop = asyncio.get_event_loop()
-        coro = bot.send_message(user_id, f"🔔 Напоминание: <b>{title}</b>\nСрок: {when_iso}")
-        asyncio.run_coroutine_threadsafe(coro, loop)
-
-    scheduler.add_job(job_send, trigger=trigger, id=job_id, replace_existing=True)
+# ------------------------------------------------------------
+# 📝 МЕНЮ ЗАДАЧ
+# ------------------------------------------------------------
+def tasks_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить задачу", callback_data="task_add")
+    kb.button(text="📋 Список задач", callback_data="task_list")
+    kb.button(text="⬅ Назад", callback_data="back_main")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
-async def reschedule_pending_reminders(scheduler: AsyncIOScheduler, bot):
-    pend = get_pending_reminders()
-    for t in pend:
-        try:
-            schedule_reminder(scheduler, bot, t["id"], t["user_id"], t["title"], t["due_datetime"])
-        except Exception as e:
-            print("Ошибка при реседулинге:", e)
+@router.callback_query(F.data == "tasks")
+async def open_tasks(callback: CallbackQuery):
+    await callback.message.edit_text("📝 Меню задач:", reply_markup=tasks_keyboard())
+    await callback.answer()
 
 
-# ---------------------------------------------------------
-#  /start
-# ---------------------------------------------------------
-@router.message(Command("start"))
-async def cmd_start(message: Message):
-    username = message.from_user.first_name or message.from_user.username
-    await message.answer(
-        f"👋 Привет, <b>{username}</b>!\n\n"
-        "Я — интеллектуальный помощник <b>МойРитм</b>.\n"
-        "Используй меню ниже 👇",
-        reply_markup=kb.main_menu
-    )
+# ------------------------------------------------------------
+# ➕ ДОБАВЛЕНИЕ ЗАДАЧИ
+# ------------------------------------------------------------
+@router.callback_query(F.data == "task_add")
+async def add_task_title(callback: CallbackQuery):
+    user_context[callback.from_user.id] = {"mode": "add_title"}
+    await callback.message.edit_text("🆕 Введи название задачи:")
+    await callback.answer()
 
 
-# ---------------------------------------------------------
-#  МЕНЮ — Мои задачи
-# ---------------------------------------------------------
-@router.message(F.text == "🧠 Мои задачи")
-async def menu_tasks(message: Message):
-    await send_clean(message, "📋 Меню задач:", kb.tasks_menu)
+async def ask_date(message: Message):
+    user_context[message.from_user.id]["mode"] = "add_date"
+    await message.answer("📅 Введи дату (дд/мм/гггг) или напиши «сегодня».")
 
 
-# ---------------------------------------------------------
-#  ➕ Добавить задачу
-# ---------------------------------------------------------
-@router.message(F.text == "➕ Добавить задачу")
-async def start_add_task(message: Message, state: FSMContext):
-    await send_clean(message, "✏️ Введи название задачи:", ReplyKeyboardRemove())
-    await state.set_state(AddTaskStates.waiting_title)
+async def ask_time(message: Message):
+    user_context[message.from_user.id]["mode"] = "add_time"
+    await message.answer("⏰ Теперь введи время (чч:мм)")
 
 
-@router.message(StateFilter(AddTaskStates.waiting_title))
-async def process_title(message: Message, state: FSMContext):
-    title = message.text.strip()
-    await state.update_data(title=title)
-    await message.answer("📅 Введи дату: (пример 12.11.2025)")
-    await state.set_state(AddTaskStates.waiting_date)
+# ------------------------------------------------------------
+# 📋 СПИСОК ЗАДАЧ
+# ------------------------------------------------------------
+@router.callback_query(F.data == "task_list")
+async def show_tasks(callback: CallbackQuery):
+    tasks = list_tasks(callback.from_user.id)
 
-
-@router.message(StateFilter(AddTaskStates.waiting_date))
-async def process_date(message: Message, state: FSMContext):
-    try:
-        dt = datetime.strptime(message.text.strip(), "%d.%m.%Y")
-        await state.update_data(date=dt.date().isoformat())
-        await message.answer("⏰ Теперь введи время (пример 14:30):")
-        await state.set_state(AddTaskStates.waiting_time)
-    except:
-        await message.answer("❌ Неверный формат. Пример: 12.11.2025")
-
-
-@router.message(StateFilter(AddTaskStates.waiting_time))
-async def process_time(message: Message, state: FSMContext):
-    try:
-        t = datetime.strptime(message.text.strip(), "%H:%M").time()
-        data = await state.get_data()
-        full = datetime.combine(datetime.fromisoformat(data["date"]), t)
-        await state.update_data(due=full.strftime("%Y-%m-%d %H:%M:%S"))
-        await message.answer("🔔 Включить напоминание? (Да/Нет)")
-        await state.set_state(AddTaskStates.waiting_remind)
-    except:
-        await message.answer("❌ Неверный формат. Пример: 14:30")
-
-
-@router.message(StateFilter(AddTaskStates.waiting_remind))
-async def process_remind(message: Message, state: FSMContext):
-    remind = not message.text.lower().startswith(("н", "no"))
-    user_id = message.from_user.id
-    data = await state.get_data()
-
-    title = data["title"]
-    due = data["due"]
-
-    task_id = add_task(user_id, title, due, remind)
-
-    try:
-        import run
-        if remind:
-            schedule_reminder(run.scheduler, message.bot, task_id, user_id, title, due)
-    except:
-        pass
-
-    await message.answer(
-        f"✅ Задача создана!\n<b>{title}</b>\nСрок: {due}",
-        reply_markup=kb.tasks_menu
-    )
-    await state.clear()
-
-
-# ---------------------------------------------------------
-#  Незавершённые
-# ---------------------------------------------------------
-@router.message(F.text == "🚧 Незавершённые задачи")
-async def active_tasks(message: Message):
-    await message.delete()
-    tasks = list_tasks(message.from_user.id, only_active=True)
     if not tasks:
-        await message.answer("Нет активных задач.", reply_markup=kb.tasks_menu)
-        return
+        await callback.message.edit_text("📭 У тебя нет задач.", reply_markup=tasks_keyboard())
+        return await callback.answer()
 
-    text = "🔎 <b>Незавершённые:</b>\n\n"
+    kb = InlineKeyboardBuilder()
+    text = "📋 <b>Твои задачи:</b>\n\n"
+
     for t in tasks:
-        text += f"• <b>{t['id']}</b> — {t['title']} ({t['due_datetime']})\n"
+        dt = t["due_datetime"]
+        text += f"• <b>{t['title']}</b> — <i>{dt}</i>\n"
+        kb.button(text=f"❌ {t['id']}", callback_data=f"del:{t['id']}")
 
-    await message.answer(text, reply_markup=kb.tasks_menu)
+    kb.button(text="⬅ Назад", callback_data="tasks")
+    kb.adjust(1)
 
-
-# ---------------------------------------------------------
-#  Завершённые
-# ---------------------------------------------------------
-@router.message(F.text == "✅ Завершённые задачи")
-async def completed_tasks(message: Message):
-    await message.delete()
-    tasks = list_tasks(message.from_user.id, only_active=False)
-    done = [t for t in tasks if t["completed"]]
-
-    if not done:
-        await message.answer("Нет выполненных задач.", reply_markup=kb.tasks_menu)
-        return
-
-    text = "📦 <b>Выполненные:</b>\n\n"
-    for t in done:
-        text += f"• <b>{t['id']}</b> — {t['title']}\n"
-
-    await message.answer(text, reply_markup=kb.tasks_menu)
+    await callback.message.edit_text(text, reply_markup=kb.as_markup())
+    await callback.answer()
 
 
-# ---------------------------------------------------------
-#  ✏️ Редактировать задачу
-# ---------------------------------------------------------
-@router.message(F.text == "✏️ Редактировать задачу")
-async def edit_prompt(message: Message, state: FSMContext):
-    await send_clean(message, "Введи ID задачи:", ReplyKeyboardRemove())
-    await state.set_state(EditTaskStates.waiting_id)
-
-
-@router.message(StateFilter(EditTaskStates.waiting_id))
-async def edit_choose(message: Message, state: FSMContext):
-    try:
-        task_id = int(message.text)
-        task = get_task(task_id)
-        if not task or task["user_id"] != message.from_user.id:
-            raise ValueError
-    except:
-        await message.answer("❌ Неверный ID. Попробуй снова.")
-        return
-
-    await state.update_data(task_id=task_id)
-
-    await message.answer(
-        "Что изменить?\n"
-        "1 — Название\n"
-        "2 — Дата/время\n"
-        "3 — Напоминание",
-    )
-    await state.set_state(EditTaskStates.choose_field)
-
-
-@router.message(StateFilter(EditTaskStates.choose_field))
-async def edit_field(message: Message, state: FSMContext):
-    if message.text == "1":
-        await message.answer("Введи новое название:")
-        await state.set_state(EditTaskStates.edit_title)
-    elif message.text == "2":
-        await message.answer("Введи новую дату (12.11.2025):")
-        await state.set_state(EditTaskStates.edit_date)
-    elif message.text == "3":
-        await message.answer("Включить напоминание? (Да/Нет)")
-        await state.set_state(EditTaskStates.edit_remind)
-    else:
-        await message.answer("Напиши 1, 2 или 3.")
-
-
-@router.message(StateFilter(EditTaskStates.edit_title))
-async def edit_title(message: Message, state: FSMContext):
-    data = await state.get_data()
-    update_task_title(data["task_id"], message.text.strip())
-
-    await message.answer("Название обновлено.", reply_markup=kb.tasks_menu)
-    await state.clear()
-
-
-@router.message(StateFilter(EditTaskStates.edit_date))
-async def edit_date(message: Message, state: FSMContext):
-    try:
-        dt = datetime.strptime(message.text.strip(), "%d.%m.%Y")
-        await state.update_data(new_date=dt.date().isoformat())
-        await message.answer("Теперь время (14:30):")
-        await state.set_state(EditTaskStates.edit_time)
-    except:
-        await message.answer("Формат неверный. Пример: 12.11.2025")
-
-
-@router.message(StateFilter(EditTaskStates.edit_time))
-async def edit_time(message: Message, state: FSMContext):
-    try:
-        t = datetime.strptime(message.text.strip(), "%H:%M").time()
-        data = await state.get_data()
-
-        dt = datetime.combine(datetime.fromisoformat(data["new_date"]), t)
-        due = dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        update_task_datetime(data["task_id"], due)
-
-        task = get_task(data["task_id"])
-        if task["remind"]:
-            import run
-            schedule_reminder(run.scheduler, message.bot, task["id"], task["user_id"], task["title"], due)
-
-        await message.answer("Дата/время обновлены.", reply_markup=kb.tasks_menu)
-        await state.clear()
-
-    except:
-        await message.answer("Формат неверный. Пример: 14:30")
-
-
-@router.message(StateFilter(EditTaskStates.edit_remind))
-async def edit_remind(message: Message, state: FSMContext):
-    enable = not message.text.lower().startswith(("н", "no"))
-    data = await state.get_data()
-    update_task_remind(data["task_id"], enable)
-
-    task = get_task(data["task_id"])
-
-    if enable:
-        import run
-        schedule_reminder(run.scheduler, message.bot, task["id"], task["user_id"], task["title"], task["due_datetime"])
-    else:
-        try:
-            import run
-            run.scheduler.remove_job(f"reminder_{task['id']}")
-        except:
-            pass
-
-    await message.answer("Напоминание обновлено.", reply_markup=kb.tasks_menu)
-    await state.clear()
-
-
-# ---------------------------------------------------------
-#  🗑 Удаление
-# ---------------------------------------------------------
-@router.message(F.text == "🗑 Удалить задачу")
-async def delete_task_prompt(message: Message, state: FSMContext):
-    await send_clean(message, "Введи ID задачи:", ReplyKeyboardRemove())
-    await state.set_state("delete_waiting_id")
-
-
-@router.message(StateFilter("delete_waiting_id"))
-async def delete_task_flow(message: Message, state: FSMContext):
-    try:
-        task_id = int(message.text)
-        task = get_task(task_id)
-        if not task or task["user_id"] != message.from_user.id:
-            raise ValueError
-    except:
-        await message.answer("Неверный ID, попробуй снова.")
-        return
-
+# Удаление задачи
+@router.callback_query(F.data.startswith("del:"))
+async def del_task_handler(callback: CallbackQuery):
+    task_id = int(callback.data.split(":")[1])
     delete_task(task_id)
-
-    try:
-        import run
-        run.scheduler.remove_job(f"reminder_{task_id}")
-    except:
-        pass
-
-    await message.answer("Задача удалена.", reply_markup=kb.tasks_menu)
-    await state.clear()
+    await show_tasks(callback)
 
 
-# ---------------------------------------------------------
-#  Универсальный fallback
-# ---------------------------------------------------------
+# ------------------------------------------------------------
+# 📅 ПЛАН ДНЯ
+# ------------------------------------------------------------
+@router.callback_query(F.data == "day")
+async def today_plan(callback: CallbackQuery):
+    today = datetime.now().strftime("%Y-%m-%d")
+    tasks = list_tasks(callback.from_user.id)
+
+    today_tasks = [t for t in tasks if t["due_datetime"].startswith(today)]
+
+    if not today_tasks:
+        await callback.message.edit_text("Сегодня задач нет 🙌", reply_markup=main_menu())
+        return await callback.answer()
+
+    text = "📅 <b>План на сегодня:</b>\n\n"
+    for t in today_tasks:
+        dt = t["due_datetime"]
+        time = dt.split(" ")[1]
+        text += f"• {t['title']} — <i>{time}</i>\n"
+
+    await callback.message.edit_text(text, reply_markup=main_menu())
+    await callback.answer()
+
+
+# ------------------------------------------------------------
+# ⏰ НАПОМИНАНИЯ
+# ------------------------------------------------------------
+@router.callback_query(F.data == "reminders")
+async def reminders_menu(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "⏰ Чтобы создать напоминание — просто добавляй задачи с датой и временем.\n"
+        "Я сам напомню вовремя!",
+        reply_markup=main_menu()
+    )
+    await callback.answer()
+
+
+# ------------------------------------------------------------
+# 🤖 ИИ ассистент
+# ------------------------------------------------------------
+@router.callback_query(F.data == "ai")
+async def ai_start(callback: CallbackQuery):
+    user_context[callback.from_user.id] = {"mode": "ai"}
+    await callback.message.edit_text("🧠 Я слушаю. Напиши вопрос.", reply_markup=ai_exit_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ai_stop")
+async def ai_stop(callback: CallbackQuery):
+    user_context.pop(callback.from_user.id, None)
+    await callback.message.edit_text("👌 Выход выполнен.", reply_markup=main_menu())
+    await callback.answer()
+
+
+# ------------------------------------------------------------
+# 🌐 ОСНОВНОЙ ОБРАБОТЧИК ТЕКСТА
+# ------------------------------------------------------------
 @router.message()
-async def fallback(message: Message):
-    await send_clean(message, "💡 Используй меню для управления задачами.", kb.main_menu)
+async def text_handler(message: Message):
+
+    user_id = message.from_user.id
+    ctx = user_context.get(user_id, {}).get("mode")
+
+    # 1 — Название задачи
+    if ctx == "add_title":
+        user_context[user_id]["title"] = message.text
+        return await ask_date(message)
+
+    # 2 — Дата задачи
+    if ctx == "add_date":
+        txt = message.text.lower()
+
+        if txt == "сегодня":
+            date = datetime.now().strftime("%d/%m/%Y")
+        else:
+            date = txt
+
+        try:
+            datetime.strptime(date, "%d/%m/%Y")
+        except:
+            return await message.answer("⚠ Формат неверный. Пример: 05/12/2024")
+
+        user_context[user_id]["date"] = date
+        return await ask_time(message)
+
+    # 3 — Время задачи
+    if ctx == "add_time":
+        try:
+            datetime.strptime(message.text, "%H:%M")
+        except:
+            return await message.answer("⚠ Формат времени неверный. Пример: 18:30")
+
+        title = user_context[user_id]["title"]
+        date = user_context[user_id]["date"]
+        time = message.text
+
+        dt = datetime.strptime(f"{date} {time}", "%d/%m/%Y %H:%M")
+
+        add_task(user_id, title, dt.strftime("%Y-%m-%d %H:%M"))
+
+        user_context.pop(user_id)
+
+        return await message.answer("✔ Задача сохранена!", reply_markup=main_menu())
+
+    # ИИ ассистент
+    if ctx == "ai":
+        await message.answer("⏳ Думаю…")
+        reply = await ai_answer(message.text)
+        return await message.answer(reply, reply_markup=ai_exit_kb())
+
+    # По умолчанию
+    return await message.answer("Выбери действие в меню:", reply_markup=main_menu())
+
+
+# ------------------------------------------------------------
+# SCHEDULER — напоминания
+# ------------------------------------------------------------
+async def setup_scheduler(scheduler, bot):
+    from app.db import get_pending_reminders
+
+    async def check_reminders():
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        tasks = get_pending_reminders(now)
+
+        for t in tasks:
+            try:
+                await bot.send_message(t["user_id"], f"🔔 Напоминание:\n<b>{t['title']}</b>")
+            except:
+                pass
+
+    scheduler.add_job(check_reminders, "interval", seconds=30)

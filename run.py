@@ -1,32 +1,29 @@
 import asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-
-from app.handlers import router, reschedule_pending_reminders
-from app.db import init_db
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from config import BOT_TOKEN
+from app import handlers
+from app.handlers import router
+
+
 async def main():
-    from config import BOT_TOKEN as token
-
-    # ИНИЦИАЛИЗАЦИЯ БАЗЫ — ОБЯЗАТЕЛЬНО!
-    init_db()
-
     bot = Bot(
-        token=token,
+        token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode="HTML")
     )
 
     dp = Dispatcher()
-
-    global scheduler
-    scheduler = AsyncIOScheduler()
-    scheduler.start()
-
-    await reschedule_pending_reminders(scheduler, bot)
     dp.include_router(router)
 
+    scheduler = AsyncIOScheduler()
+    await handlers.setup_scheduler(scheduler, bot)
+    scheduler.start()
+
+    print("Бот запущен!")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
