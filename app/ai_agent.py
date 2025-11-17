@@ -11,8 +11,8 @@ async def ai_answer(user_message: str) -> str:
                 {
                     "role": "system",
                     "content": (
-                        "Ты умный планировщик. Отвечай коротко, по делу, "
-                        "как ИИ ассистент по задачам."
+                        "Ты умный ассистент планировщика. "
+                        "Отвечай коротко и по делу."
                     )
                 },
                 {"role": "user", "content": user_message},
@@ -21,8 +21,8 @@ async def ai_answer(user_message: str) -> str:
             max_tokens=350
         )
 
-        return response.choices[0].message.content
+        return response.choices[0].message["content"]
 
     except Exception as e:
         print("AI ERROR:", e)
-        return "⚠ Произошла ошибка, попробуй позже."
+        return "⚠ Произошла ошибка при обращении к ИИ."

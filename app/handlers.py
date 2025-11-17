@@ -24,6 +24,10 @@ async def start(message: Message):
 async def menu(message: Message):
     await message.answer("Главное меню:", reply_markup=main_menu())
 
+@router.callback_query(F.data == "back_main")
+async def back_to_main(callback: CallbackQuery):
+    await callback.message.edit_text("Главное меню:", reply_markup=main_menu())
+    await callback.answer()
 
 # ------------------------------------------------------------
 # 📝 МЕНЮ ЗАДАЧ
@@ -105,7 +109,12 @@ async def today_plan(callback: CallbackQuery):
     today = datetime.now().strftime("%Y-%m-%d")
     tasks = list_tasks(callback.from_user.id)
 
-    today_tasks = [t for t in tasks if t["due_datetime"].startswith(today)]
+    # ---- Исправленная фильтрация ----
+    today_tasks = [
+        t for t in tasks
+        if t["due_datetime"][:10] == today  # сравниваем только дату YYYY-MM-DD
+    ]
+
 
     if not today_tasks:
         await callback.message.edit_text("Сегодня задач нет 🙌", reply_markup=main_menu())
