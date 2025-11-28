@@ -1,40 +1,23 @@
-import os
-import asyncio
-from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher
-from aiogram.enums import ChatAction
+import aiohttp
 
-# Импортируем роутер (убедитесь, что файл handlers.py существует)
-from app.handlers import router
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL = "llama3.2"  # или phi3
 
-dp = Dispatcher()
-
-
-async def main():
-    load_dotenv()
-    token = os.getenv('TG_TOKEN')
-
-    if not token:
-        print("Ошибка: TG_TOKEN не найден в переменных окружения")
-        return
-
-    bot = Bot(token=token)
-
-    # Подключаем роутеры
-    dp.include_router(router)
-
+async def ai_answer(user_text: str) -> str:
     try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        print("✅ Бот запущен успешно!")
-        await dp.start_polling(bot)
+        payload = {
+            "model": MODEL,
+            "prompt": user_text,
+            "stream": False
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(OLLAMA_URL, json=payload) as resp:
+                if resp.status != 200:
+                    return f"⚠️ Ошибка Ollama: {await resp.text()}"
+
+                data = await resp.json()
+                return data.get("response", "⚠️ Модель не ответила")
+
     except Exception as e:
-        print(f"Ошибка при запуске бота: {e}")
-    finally:
-        await bot.session.close()
-
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print('Бот выключен')
+        return f"⚠️ Ошибка: {e}"

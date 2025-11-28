@@ -214,7 +214,9 @@ async def text_handler(message: Message):
     if ctx == "ai":
         await message.answer("⏳ Думаю…")
         reply = await ai_answer(message.text)
+        print("AI reply for user", message.from_user.id, "->", reply)  # лог в консоль
         return await message.answer(reply, reply_markup=ai_exit_kb())
+
 
     # По умолчанию
     return await message.answer("Выбери действие в меню:", reply_markup=main_menu())
