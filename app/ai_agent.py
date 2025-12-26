@@ -1,23 +1,32 @@
-import aiohttp
+import google.generativeai as genai
+from config import GEMINI_API_KEY
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "llama3.2"  
+# 1. Настройка API
+genai.configure(api_key=GEMINI_API_KEY)
+
+# 2. Описание роли бота (Системная инструкция)
+SYSTEM_PROMPT = """
+Ты — МойРитм, персональный помощник по тайм-менеджменту в Telegram.
+Твои задачи:
+1. Помогать пользователю формулировать задачи.
+2. Давать краткие советы по продуктивности.
+3. Быть дружелюбным, мотивирующим, но конкретным.
+4. Если пользователь просит создать задачу, напоминай ему, что он может сделать это через меню кнопок.
+
+Не пиши слишком длинные ответы, так как это чат в Telegram.
+"""
+
+# 3. Инициализация модели с инструкцией
+model = genai.GenerativeModel(
+    "gemini-1.5-flash",
+    system_instruction=SYSTEM_PROMPT  # 👈 Вот здесь мы передаем роль
+)
 
 async def ai_answer(user_text: str) -> str:
     try:
-        payload = {
-            "model": MODEL,
-            "prompt": user_text,
-            "stream": False
-        }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(OLLAMA_URL, json=payload) as resp:
-                if resp.status != 200:
-                    return f"⚠️ Ошибка Ollama: {await resp.text()}"
-
-                data = await resp.json()
-                return data.get("response", "⚠️ Модель не ответила")
+        # Отправляем запрос
+        response = await model.generate_content_async(user_text)
+        return response.text
 
     except Exception as e:
-        return f"⚠️ Ошибка: {e}"
+        return f"⚠️ Ошибка связи с мозгом: {e}"
