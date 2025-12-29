@@ -5,14 +5,14 @@ import re
 from datetime import datetime
 
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove, BufferedInputFile, ContentType
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramBadRequest # <--- ВАЖНЫЙ ИМПОРТ ДЛЯ ИСПРАВЛЕНИЯ ОШИБКИ
+from aiogram.exceptions import TelegramBadRequest
 
-# Импорты наших модулей
+# Импорты наших модулей (Добавил task_actions)
 from app.ai_agent import ai_answer
-from app.keyboards import main_menu, ai_exit_kb
+from app.keyboards import main_menu, ai_exit_kb, task_actions
 
 # Импорты для работы с базой данных
 from app.db import (
@@ -42,47 +42,24 @@ user_context = {}
 # ==========================================================
 
 async def safe_delete(bot, chat_id, message_id):
-    """
-    Безопасное удаление сообщения.
-    """
-    if not message_id:
-        return
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception as e:
-        pass
+    if not message_id: return
+    try: await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception: pass
 
 def update_last_msg(user_id, msg_id):
-    """
-    Запоминаем ID последнего сообщения бота.
-    """
-    if user_id not in user_context:
-        user_context[user_id] = {}
+    if user_id not in user_context: user_context[user_id] = {}
     user_context[user_id]["last_msg_id"] = msg_id
 
 def get_last_msg(user_id):
-    """Получаем ID последнего сообщения"""
     return user_context.get(user_id, {}).get("last_msg_id")
 
 async def nav_edit_or_send(callback: CallbackQuery, text: str, reply_markup):
-    """
-    ⚡ УМНАЯ НАВИГАЦИЯ (ИСПРАВЛЕНИЕ ОШИБКИ С КАРТИНКОЙ)
-    Пытается отредактировать текст. Если это невозможно (например, предыдущее
-    сообщение было фото-статистикой), удаляет старое и шлет новое.
-    """
     user_id = callback.from_user.id
     try:
-        # Пытаемся просто изменить текст (быстро и красиво)
         await callback.message.edit_text(text, reply_markup=reply_markup)
         update_last_msg(user_id, callback.message.message_id)
     except TelegramBadRequest:
-        # Опа! Ошибка. Скорее всего мы пытаемся превратить ФОТО в ТЕКСТ.
-        # Telegram так не умеет. Значит:
-        
-        # 1. Удаляем старое сообщение (фото)
         await safe_delete(callback.bot, callback.message.chat.id, callback.message.message_id)
-        
-        # 2. Отправляем новое чистое сообщение
         sent_msg = await callback.message.answer(text, reply_markup=reply_markup)
         update_last_msg(user_id, sent_msg.message_id)
 
@@ -91,49 +68,120 @@ def parse_json_from_text(text: str):
         cleaned_text = text.replace("```json", "").replace("```", "").strip()
         start_index = cleaned_text.find("{")
         end_index = cleaned_text.rfind("}")
-        
         if start_index != -1 and end_index != -1:
-            json_substring = cleaned_text[start_index : end_index + 1]
-            return json.loads(json_substring)
+            return json.loads(cleaned_text[start_index : end_index + 1])
     except Exception as e:
         logging.error(f"Ошибка парсинга JSON: {e}")
-        return None
     return None
 
 def parse_date_time(date_str, time_str):
     d = str(date_str).replace(".", "/").replace("-", "/").strip()
     t = str(time_str).replace(".", ":").replace("-", ":").strip()
-    
-    formats = [
-        "%d/%m/%Y %H:%M",
-        "%Y/%m/%d %H:%M",
-        "%d-%m-%Y %H:%M",
-        "%d/%m/%y %H:%M",
-    ]
+    formats = ["%d/%m/%Y %H:%M", "%Y/%m/%d %H:%M", "%d-%m-%Y %H:%M", "%d/%m/%y %H:%M", "%Y-%m-%d %H:%M"]
     for fmt in formats:
-        try:
-            return datetime.strptime(f"{d} {t}", fmt)
-        except ValueError:
-            continue
+        try: return datetime.strptime(f"{d} {t}", fmt)
+        except ValueError: continue
     return None
 
 # ==========================================================
-# 🏠 ГЛАВНОЕ МЕНЮ И НАВИГАЦИЯ
+# 🏠 ГЛАВНОЕ МЕНЮ И СТАРТ
 # ==========================================================
 
 @router.message(F.text == "/start")
 async def start(message: Message):
     await safe_delete(message.bot, message.chat.id, message.message_id)
-    await message.answer(
-        "🤖 <b>МойРитм запущен</b>\n"
-        "〰〰〰〰〰〰〰〰〰〰\n"
-        "<i>(Это системное сообщение, чтобы чат не прыгал)</i>"
-    )
+    await message.answer("🤖 <b>МойРитм запущен</b>\n〰〰〰〰〰〰〰〰〰〰\n<i>(Системное сообщение)</i>")
+    
+    # Обновил текст, чтобы подсказать про кнопку App
     sent_msg = await message.answer(
-        "👋 <b>Привет! Я — твой помощник.</b>\nВыбери действие:", 
+        "👋 <b>Привет! Я — твой помощник.</b>\n"
+        "Теперь у меня есть удобное приложение! Жми кнопку ниже 👇", 
         reply_markup=main_menu()
     )
     update_last_msg(message.from_user.id, sent_msg.message_id)
+
+# ==========================================================
+# 🚀 ОБРАБОТЧИК ДАННЫХ ИЗ MINI APP (НОВЫЙ ФУНКЦИОНАЛ)
+# ==========================================================
+@router.message(F.content_type == ContentType.WEB_APP_DATA)
+async def web_app_handler(message: Message):
+    try:
+        data = json.loads(message.web_app_data.data)
+        action = data.get("action")
+        user_id = message.from_user.id
+
+        # 1. ДОБАВЛЕНИЕ ЗАДАЧИ
+        if action == "add_task_full":
+            cat = data.get("category", "Общее")
+            title = data.get("task")
+            # Формируем дату и время для БД
+            date_time = f"{data.get('date')} {data.get('time')}"
+            full_title = f"[{cat}] {title}"
+            
+            add_task(user_id, full_title, date_time)
+            
+            await message.answer(
+                f"✅ <b>Задача сохранена!</b>\n\n🎯 {full_title}\n📅 {date_time}",
+                reply_markup=main_menu(), parse_mode="HTML"
+            )
+
+        # 2. ПОЛУЧЕНИЕ ПЛАНА (Кнопка в приложении)
+        elif action == "get_plan":
+            today = datetime.now().strftime("%Y-%m-%d")
+            tasks = get_tasks_for_day(user_id, today)
+            
+            if not tasks:
+                await message.answer("🌴 <b>На сегодня задач нет!</b>", reply_markup=main_menu(), parse_mode="HTML")
+            else:
+                txt = f"📅 <b>План на сегодня ({datetime.now().strftime('%d.%m')}):</b>\n\n"
+                for t in tasks:
+                    time = t['due_datetime'].split(' ')[1] if ' ' in t['due_datetime'] else t['due_datetime']
+                    status = "✅" if t['status'] == 'done' else "⭕"
+                    txt += f"{status} <b>{time}</b> — {t['title']}\n"
+                
+                await message.answer(txt, reply_markup=main_menu(), parse_mode="HTML")
+                # Можно отправить последнюю задачу с кнопками управления
+                if tasks:
+                    last_t = tasks[-1]
+                    await message.answer(
+                        f"Управление последней задачей: <b>{last_t['title']}</b>", 
+                        reply_markup=task_actions(last_t['id'], last_t['status']), 
+                        parse_mode="HTML"
+                    )
+
+        # 3. ПОЛУЧЕНИЕ СТАТИСТИКИ
+        elif action == "get_stats":
+            comp, pend, days, counts = get_stats_data(user_id)
+            # Рисуем график
+            photo_buf = draw_stats_chart(comp, pend, days, counts)
+            img = BufferedInputFile(photo_buf.read(), filename="stats.png")
+            
+            await message.answer_photo(
+                photo=img,
+                caption=f"📊 <b>Ваша статистика:</b>\n\n✅ Сделано: {comp}\n🔥 В работе: {pend}",
+                reply_markup=main_menu()
+            )
+
+        # 4. ЗАПРОС К ИИ
+        elif action == "ai_query":
+            query = data.get("query")
+            wait_msg = await message.answer(f"🧠 <b>Думаю над вопросом...</b>", parse_mode="HTML")
+            
+            # Собираем контекст задач
+            raw = list_tasks(user_id)
+            ctx = "\n".join([f"- {t['title']} ({t['due_datetime']})" for t in raw]) if raw else "Задач нет."
+            
+            resp = await ai_answer(query, tasks_context=ctx)
+            await wait_msg.delete()
+            await message.answer(resp, parse_mode="Markdown", reply_markup=main_menu())
+
+    except Exception as e:
+        logging.error(f"WebApp Error: {e}")
+        await message.answer("⚠ Ошибка обработки данных из приложения.")
+
+# ==========================================================
+# 📝 СТАРЫЙ ФУНКЦИОНАЛ (КНОПКИ В ЧАТЕ)
+# ==========================================================
 
 @router.message(F.text == "/menu")
 async def menu(message: Message):
@@ -146,13 +194,8 @@ async def menu(message: Message):
 
 @router.callback_query(F.data == "back_main")
 async def back_to_main(callback: CallbackQuery):
-    # Используем нашу умную функцию, чтобы кнопка "Назад" работала везде
     await nav_edit_or_send(callback, "Главное меню:", main_menu())
     await callback.answer()
-
-# ==========================================================
-# 📝 УПРАВЛЕНИЕ ЗАДАЧАМИ (КНОПКИ)
-# ==========================================================
 
 def tasks_keyboard():
     kb = InlineKeyboardBuilder()
@@ -164,23 +207,15 @@ def tasks_keyboard():
 
 @router.callback_query(F.data == "tasks")
 async def open_tasks(callback: CallbackQuery):
-    # Исправлено: используем nav_edit_or_send
-    await nav_edit_or_send(
-        callback, 
-        "📝 <b>Меню задач:</b>\nВыбери действие:", 
-        tasks_keyboard()
-    )
+    await nav_edit_or_send(callback, "📝 <b>Меню задач:</b>\nВыбери действие:", tasks_keyboard())
 
 # --- БЛОК: РУЧНОЕ ДОБАВЛЕНИЕ ЗАДАЧИ ---
 
 @router.callback_query(F.data == "task_add")
 async def add_task_title(callback: CallbackQuery):
     user_id = callback.from_user.id
-    if user_id not in user_context:
-        user_context[user_id] = {}
+    if user_id not in user_context: user_context[user_id] = {}
     user_context[user_id]["mode"] = "add_title"
-    
-    # Здесь тоже безопасно переходим
     await nav_edit_or_send(callback, "🆕 <b>Шаг 1 из 3:</b>\nНапиши название задачи:", None)
 
 async def ask_date_step(message: Message, last_bot_msg_id):
@@ -279,8 +314,6 @@ async def open_calendar_handler(callback: CallbackQuery):
     now = datetime.now()
     year, month = now.year, now.month
     active_days = get_days_with_tasks(callback.from_user.id, year, month)
-    
-    # Исправлено: используем безопасный переход
     await nav_edit_or_send(
         callback,
         f"📅 <b>Календарь задач</b>\nВыберите дату:",
@@ -299,20 +332,14 @@ async def calendar_action_handler(callback: CallbackQuery):
     if action in ["prev", "next"]:
         year = int(parts[2])
         month = int(parts[3])
-        
         if action == "prev":
             month -= 1
-            if month < 1:
-                month = 12
-                year -= 1
+            if month < 1: month = 12; year -= 1
         elif action == "next":
             month += 1
-            if month > 12:
-                month = 1
-                year += 1
+            if month > 12: month = 1; year += 1
         
         active_days = get_days_with_tasks(callback.from_user.id, year, month)
-        # Внутри календаря можно использовать edit, т.к. мы уже в текстовом режиме
         await callback.message.edit_reply_markup(
             reply_markup=build_month(year, month, active_days)
         )
@@ -343,7 +370,6 @@ async def calendar_action_handler(callback: CallbackQuery):
         year = int(parts[2])
         month = int(parts[3])
         active_days = get_days_with_tasks(callback.from_user.id, year, month)
-        
         await callback.message.edit_text(
             f"📅 <b>Календарь задач</b>\nВыберите дату:",
             reply_markup=build_month(year, month, active_days)
@@ -358,7 +384,6 @@ async def today_plan(callback: CallbackQuery):
     today_tasks = [t for t in tasks if t["due_datetime"].startswith(today_str)]
     
     if not today_tasks:
-        # Исправлено: nav_edit_or_send
         await nav_edit_or_send(callback, "🌴 <b>На сегодня задач нет!</b>\nМожно отдохнуть.", main_menu())
         return
 
@@ -371,7 +396,6 @@ async def today_plan(callback: CallbackQuery):
 
 @router.callback_query(F.data == "reminders")
 async def reminders_menu(callback: CallbackQuery):
-    # Исправлено: nav_edit_or_send
     await nav_edit_or_send(
         callback,
         "⏰ <b>Информация о напоминаниях:</b>\n\n"
@@ -388,8 +412,6 @@ async def reminders_menu(callback: CallbackQuery):
 async def ai_start(callback: CallbackQuery):
     user_id = callback.from_user.id
     user_context[user_id] = {"mode": "ai"}
-    
-    # Исправлено: nav_edit_or_send
     await nav_edit_or_send(
         callback,
         "🧠 <b>ИИ-Ассистент активирован.</b>\n\n"

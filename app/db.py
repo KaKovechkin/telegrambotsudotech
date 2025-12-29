@@ -1,196 +1,146 @@
 import sqlite3
 from datetime import datetime
-from config import DB_PATH
+
+DB_NAME = "tasks.db"
 
 def init_db():
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        title TEXT,
-        due_datetime TEXT,
-        remind INTEGER DEFAULT 1,
-        completed INTEGER DEFAULT 0
-    )
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            title TEXT,
+            due_datetime TEXT,
+            status TEXT DEFAULT 'pending'
+        )
     """)
+    conn.commit()
+    conn.close()
 
-    con.commit()
-    con.close()
+def add_task(user_id, title, due_datetime):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO tasks (user_id, title, due_datetime) VALUES (?, ?, ?)", 
+                   (user_id, title, due_datetime))
+    conn.commit()
+    conn.close()
 
-init_db()
-
-# Добавление задачи
-def add_task(user_id, title, due_datetime, remind=1):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-
-    cur.execute("""
-        INSERT INTO tasks (user_id, title, due_datetime, remind)
-        VALUES (?, ?, ?, ?)
-    """, (user_id, title, due_datetime, int(remind)))
-
-    con.commit()
-    con.close()
-
-# Список задач
 def list_tasks(user_id):
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT * FROM tasks
-        WHERE user_id=?
-        ORDER BY due_datetime
-    """, (user_id,))
-
-    rows = cur.fetchall()
-    con.close()
-    return rows
-
-# Удаление
-def delete_task(task_id):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-    con.commit()
-    con.close()
-
-# Получить напоминания
-def get_pending_reminders(now):
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
-
-    cur.execute("""
-        SELECT * FROM tasks
-        WHERE remind=1 AND completed=0 AND due_datetime=?
-    """, (now,))
-
-    rows = cur.fetchall()
-    con.close()
-    return rows
-
-# === НОВЫЕ ФУНКЦИИ ДЛЯ КАЛЕНДАРЯ ===
-
-def get_tasks_for_day(user_id, date_str):
-    """
-    Возвращает задачи за конкретный день.
-    """
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row # Позволяет обращаться к полям по имени
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM tasks WHERE user_id = ? AND status != 'done' ORDER BY due_datetime", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
     
-    # Ищем задачи, где дата начинается с 'YYYY-MM-DD'
-    search_pattern = f"{date_str}%"
-    
-    cur.execute("""
-        SELECT * FROM tasks
-        WHERE user_id=? AND due_datetime LIKE ?
-        ORDER BY due_datetime
-    """, (user_id, search_pattern))
-    
-    rows = cur.fetchall()
-    con.close()
-    return rows
-
-def get_days_with_tasks(user_id, year, month):
-    """
-    Возвращает список чисел (дней), на которые есть задачи в месяце.
-    """
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    
-    search_pattern = f"{year}-{month:02d}-%"
-    
-    cur.execute("""
-        SELECT due_datetime FROM tasks
-        WHERE user_id=? AND due_datetime LIKE ?
-    """, (user_id, search_pattern))
-    
-    rows = cur.fetchall()
-    con.close()
-    
-    active_days = set()
+    # Конвертируем в список словарей для удобства JSON
+    tasks = []
     for row in rows:
-        try:
-            # row[0] = '2025-05-25 14:00'. Бьем строку, чтобы достать '25'
-            day_str = row[0].split(" ")[0].split("-")[2]
-            active_days.add(int(day_str))
-        except:
-            continue
-            
-    return list(active_days)
+        tasks.append({
+            "id": row["id"],
+            "title": row["title"],
+            "due_datetime": row["due_datetime"],
+            "status": row["status"]
+        })
+    return tasks
 
-# ... (начало файла без изменений)
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ MINI APP ---
+def get_all_tasks_json(user_id):
+    """Возвращает ВСЕ задачи (и выполненные) для статистики и календаря"""
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM tasks WHERE user_id = ? ORDER BY due_datetime", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    tasks = []
+    for row in rows:
+        tasks.append({
+            "id": row["id"],
+            "title": row["title"],
+            "due_datetime": row["due_datetime"],
+            "status": row["status"]
+        })
+    return tasks
 
-# ОБНОВЛЕННАЯ функция списка задач (показывает только активные)
-def list_tasks(user_id):
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
-
-    # Берем только те, где completed = 0
-    cur.execute("""
-        SELECT * FROM tasks
-        WHERE user_id=? AND completed=0
-        ORDER BY due_datetime
-    """, (user_id,))
-
-    rows = cur.fetchall()
-    con.close()
-    return rows
-
-# === НОВЫЕ ФУНКЦИИ ДЛЯ КИЛЛЕР-ФИЧИ ===
+def delete_task(task_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
 
 def mark_task_completed(task_id):
-    """Помечает задачу как выполненную"""
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("UPDATE tasks SET completed=1 WHERE id=?", (task_id,))
-    con.commit()
-    con.close()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
 
-def get_stats_data(user_id):
-    """Собирает цифры для графиков"""
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
+def get_pending_reminders(current_time_str):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM tasks WHERE due_datetime = ? AND status != 'done'", (current_time_str,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_days_with_tasks(user_id, year, month):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    search_pattern = f"{year}-{month:02d}-%"
+    cursor.execute("SELECT due_datetime FROM tasks WHERE user_id = ? AND due_datetime LIKE ?", (user_id, search_pattern))
+    rows = cursor.fetchall()
+    conn.close()
     
-    # 1. Считаем выполненные и активные
-    cur.execute("SELECT COUNT(*) FROM tasks WHERE user_id=? AND completed=1", (user_id,))
-    completed_count = cur.fetchone()[0]
-    
-    cur.execute("SELECT COUNT(*) FROM tasks WHERE user_id=? AND completed=0", (user_id,))
-    pending_count = cur.fetchone()[0]
-    
-    # 2. Считаем нагрузку по дням (для активных задач)
-    # Группируем по дате (первые 10 символов строки времени: YYYY-MM-DD)
-    cur.execute("""
-        SELECT substr(due_datetime, 1, 10) as day, COUNT(*) 
-        FROM tasks 
-        WHERE user_id=? AND completed=0
-        GROUP BY day
-        ORDER BY day ASC
-        LIMIT 5
-    """, (user_id,))
-    
-    rows = cur.fetchall()
-    con.close()
-    
-    # Подготовка данных для графика
-    days = []
-    counts = []
-    for r in rows:
-        # Превращаем '2025-12-31' в '31.12' для красоты
+    days = set()
+    for row in rows:
         try:
-            date_part = r[0].split("-")
-            formatted_date = f"{date_part[2]}.{date_part[1]}"
-            days.append(formatted_date)
-            counts.append(r[1])
+            date_part = row[0].split(" ")[0] # Берём '2023-10-25'
+            day = int(date_part.split("-")[2])
+            days.add(day)
         except:
             continue
+    return list(days)
+
+def get_tasks_for_day(user_id, date_str):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    # date_str приходит как YYYY-MM-DD
+    search_pattern = f"{date_str}%"
+    cursor.execute("SELECT * FROM tasks WHERE user_id = ? AND due_datetime LIKE ? ORDER BY due_datetime", (user_id, search_pattern))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_stats_data(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT COUNT(*) FROM tasks WHERE user_id = ? AND status = 'done'", (user_id,))
+    completed = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM tasks WHERE user_id = ? AND status != 'done'", (user_id,))
+    pending = cursor.fetchone()[0]
+    
+    # Уникальные дни с задачами (активность)
+    cursor.execute("SELECT COUNT(DISTINCT substr(due_datetime, 1, 10)) FROM tasks WHERE user_id = ?", (user_id,))
+    active_days = cursor.fetchone()[0]
+    
+    # Категории (парсим из [Категория] Название)
+    cursor.execute("SELECT title FROM tasks WHERE user_id = ?", (user_id,))
+    all_titles = cursor.fetchall()
+    
+    category_counts = {}
+    for t in all_titles:
+        title = t[0]
+        if title.startswith("[") and "]" in title:
+            cat = title.split("]")[0].strip("[")
+            category_counts[cat] = category_counts.get(cat, 0) + 1
             
-    return completed_count, pending_count, days, counts
+    conn.close()
+    return completed, pending, active_days, category_counts
