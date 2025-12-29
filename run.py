@@ -15,7 +15,7 @@ async def main():
     )
 
     dp = Dispatcher()
-    dp.include_router(router)
+    dp.include_router(router) 
 
     scheduler = AsyncIOScheduler()
     await handlers.setup_scheduler(scheduler, bot)

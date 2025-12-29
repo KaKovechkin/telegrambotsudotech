@@ -1,44 +1,52 @@
-
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
-from datetime import date, datetime, timedelta
 import calendar
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-def build_month(year:int, month:int) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=7)
-    # Header prev, title, next
+def build_month(year: int, month: int, active_days: list = None) -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру-календарь на месяц.
+    active_days — список чисел дней, где есть задачи (их выделим).
+    """
+    if active_days is None:
+        active_days = []
+
+    kb = InlineKeyboardBuilder()
+    
+    # --- 1. Шапка (Месяц Год) и навигация ---
+    # Кнопки: <  Месяц Год  >
     kb.row(
-        InlineKeyboardButton("<", callback_data=f"cal:prev:{year}:{month}"),
-        InlineKeyboardButton(f"{calendar.month_name[month]} {year}", callback_data="cal:noop"),
-        InlineKeyboardButton(">", callback_data=f"cal:next:{year}:{month}")
+        InlineKeyboardButton(text="<<", callback_data=f"cal:prev:{year}:{month}"),
+        InlineKeyboardButton(text=f"{calendar.month_name[month]} {year}", callback_data="cal:ignore"),
+        InlineKeyboardButton(text=">>", callback_data=f"cal:next:{year}:{month}")
     )
-    # Weekdays
-    days = ["Mo","Tu","We","Th","Fr","Sa","Su"]
-    kb.row(*[InlineKeyboardButton(d, callback_data="cal:noop") for d in days])
 
-    cal = calendar.Calendar(firstweekday=0)
-    for week in cal.monthdayscalendar(year, month):
-        row = []
-        for d in week:
-            if d==0:
-                row.append(InlineKeyboardButton(" ", callback_data="cal:noop"))
+    # --- 2. Дни недели ---
+    days_of_week = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    row_days = [InlineKeyboardButton(text=d, callback_data="cal:ignore") for d in days_of_week]
+    kb.row(*row_days)
+
+    # --- 3. Сетка дней ---
+    cal = calendar.Calendar(firstweekday=0) # 0 = Понедельник
+    month_days = cal.monthdayscalendar(year, month)
+
+    for week in month_days:
+        row_btns = []
+        for day in week:
+            if day == 0:
+                # Пустая кнопка (день другого месяца)
+                row_btns.append(InlineKeyboardButton(text=" ", callback_data="cal:ignore"))
             else:
-                row.append(InlineKeyboardButton(str(d), callback_data=f"cal:day:{year}:{month}:{d}"))
-        kb.row(*row)
-    kb.row(InlineKeyboardButton("Отмена", callback_data="cal:cancel"))
-    return kb
+                # Проверяем, есть ли задачи на этот день
+                if day in active_days:
+                    btn_text = f"• {day} •"  # Выделяем
+                else:
+                    btn_text = str(day)
+                
+                row_btns.append(InlineKeyboardButton(text=btn_text, callback_data=f"cal:day:{year}:{month}:{day}"))
+        
+        kb.row(*row_btns)
 
-def build_time_picker() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=4)
-    # показать часы каждые 1 час (00:00 .. 23:00)
-    for h in range(0,24,4):  # показываем по 4 в ряд, но выводим все — будем генерировать per 1
-        pass
-    # build all hours lines (every hour)
-    buttons=[]
-    for h in range(0,24):
-        txt = f"{h:02d}:00"
-        buttons.append(InlineKeyboardButton(txt, callback_data=f"time:hour:{h}"))
-    # chunk into rows of 4
-    for i in range(0, len(buttons), 4):
-        kb.row(*buttons[i:i+4])
-    kb.row(InlineKeyboardButton("Отмена", callback_data="time:cancel"))
-    return kb
+    # --- 4. Кнопка "Назад" ---
+    kb.row(InlineKeyboardButton(text="🔙 Назад в меню", callback_data="back_main"))
+
+    return kb.as_markup()
